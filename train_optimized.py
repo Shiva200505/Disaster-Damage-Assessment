@@ -31,7 +31,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, Dataset
@@ -218,7 +218,7 @@ def train_epoch(model, loader, criterion, optimizer, scheduler, scaler, device):
         pre, post, mask = pre.to(device), post.to(device), mask.to(device)
         optimizer.zero_grad()
 
-        with autocast():
+        with autocast('cuda'):
             logits = model(pre, post)
             loss   = criterion(logits, mask)
 
@@ -246,7 +246,7 @@ def val_epoch(model, loader, criterion, device):
 
     for pre, post, mask in loader:
         pre, post, mask = pre.to(device), post.to(device), mask.to(device)
-        with autocast():
+        with autocast('cuda'):
             logits = model(pre, post)
             loss   = criterion(logits, mask)
         preds     = torch.sigmoid(logits)
@@ -302,17 +302,21 @@ def main():
     # Auto-resume
     best_f1 = 0.0
     patience_ct = 0
+    start_epoch = 1
     if CKPT_BEST.exists():
         ckpt = torch.load(CKPT_BEST, map_location=device)
         model.load_state_dict(ckpt["model"])          # key is "model" per save_checkpoint
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
         best_f1 = ckpt.get("val_f1", 0.0)
-        log.info(f"Resumed from {CKPT_BEST}  — previous best val_f1={best_f1:.4f}")
+        start_epoch = ckpt.get("epoch", 0) + 1
+        log.info(f"Resumed from {CKPT_BEST} (epoch {start_epoch-1}) — previous best val_f1={best_f1:.4f}")
 
     log.info("=" * 70)
     log.info(f"Optimized Training  |  BS={BATCH_SIZE}  LR_MAX={LR_MAX}  EPOCHS={EPOCHS}")
     log.info("=" * 70)
 
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(start_epoch, EPOCHS + 1):
         t0 = time.time()
         tr_loss, tr_iou, tr_f1 = train_epoch(
             model, train_loader, criterion, optimizer, scheduler, scaler, device)

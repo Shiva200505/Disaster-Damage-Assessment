@@ -12,14 +12,13 @@ Implements:
   evaluate_classifier  – full evaluation pass for classifier DataLoader
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
 from sklearn.metrics import (
     f1_score as sklearn_f1,
     confusion_matrix as sklearn_cm,
-    classification_report,
 )
 
 
@@ -104,7 +103,7 @@ def per_class_f1(
     return result
 
 
-def confusion_matrix(
+def build_confusion_matrix(
     preds: List[int],
     targets: List[int],
     num_classes: int = 4,
@@ -178,7 +177,7 @@ def evaluate_classifier(
     loader: torch.utils.data.DataLoader,
     device: str = "cpu",
     num_classes: int = 4,
-) -> Dict:
+) -> Dict[str, Any]:
     """
     Run the damage classifier over all batches and compute per-class F1
     and the confusion matrix.
@@ -197,5 +196,5 @@ def evaluate_classifier(
         all_labels.extend(labels.tolist())
 
     f1s = per_class_f1(all_preds, all_labels, num_classes=num_classes)
-    cm  = confusion_matrix(all_preds, all_labels, num_classes=num_classes)
+    cm  = build_confusion_matrix(all_preds, all_labels, num_classes=num_classes)
     return {**f1s, "confusion_matrix": cm}

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assessment Output Map</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #0ea5e9;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', -apple-system, sans-serif;
+        }
+
+        body {
+            background-color: #f8fafc;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            color: #334155;
+        }
+
+        .header {
+            background-color: #ffffff;
+            height: 64px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 2rem;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            z-index: 10;
+        }
+
+        .title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #0f172a;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .title span {
+            color: var(--primary);
+        }
+
+        .btn-back {
+            background-color: #f1f5f9;
+            color: #475569;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-weight: 500;
+            font-size: 0.95rem;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-back:hover {
+            background-color: #e2e8f0;
+            color: #0f172a;
+        }
+
+        .map-container {
+            flex-grow: 1;
+            width: 100%;
+            position: relative;
+            background: #e2e8f0;
+        }
+
+        iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">Damage Assessment <span>Output</span></div>
+        <a href="/" class="btn-back">
+            <span>←</span> Process New Images
+        </a>
+    </div>
+    
+    <div class="map-container">
+        <!-- The interactive Folium map loads directly here -->
+        <iframe src="/map/{{ folder }}/{{ map_file }}"></iframe>
+    </div>
+</body>
+</html>
