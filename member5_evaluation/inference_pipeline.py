@@ -101,7 +101,7 @@ def run_inference(
     geojson_path:    Optional[str | Path] = None,
     output_dir:      str | Path = "outputs/inference",
     device:          str = "cuda",
-    add_spectral:    bool = True,
+    add_spectral:    bool = cfg.preprocess.add_spectral,
     map_threshold:   float = 0.5,
     disaster_name:   str = "Disaster Zone",
 ) -> Dict:
@@ -138,9 +138,9 @@ def run_inference(
 
     # ── 1. Load images ────────────────────────────────────────────────────────
     log.info("Loading images …")
-    pre_img  = _load_rgb(pre_img_path)
-    post_img = _load_rgb(post_img_path)
-    post_img = align_images(pre_img, post_img)
+    pre_img       = _load_rgb(pre_img_path)
+    post_img_orig = _load_rgb(post_img_path)   # keep original for overlay (no warp artifacts)
+    post_img      = align_images(pre_img, post_img_orig)
 
     H, W = pre_img.shape[:2]
 
@@ -185,26 +185,45 @@ def run_inference(
     log.info(f"Found {len(polygons)} building polygons.")
 
     # ── 5. Damage classification ──────────────────────────────────────────────
-    log.info("Classifying damage severity …")
-    classifier = DamageClassifier(num_classes=4, pretrained=False).to(device)
-    load_checkpoint(classifier_ckpt, classifier, device=device)
-
-    crops  = extract_building_crops(post_img, polygons,
-                                    crop_size=cfg.classifier.crop_size)
-    labels = classify_buildings(classifier, crops, device=device) if crops else []
+    # Use Siamese change probability per polygon as the damage signal.
+    # The EfficientNet classifier checkpoint was not trained on 4-class labels
+    # and always predicts label 0, so we classify by mean change probability:
+    #   < 0.20  → 0 No Damage   (green)
+    #   < 0.45  → 1 Minor       (yellow)
+    #   < 0.70  → 2 Major       (orange)
+    #   >= 0.70 → 3 Destroyed   (red)
+    log.info("Classifying damage severity from change probability map …")
+    labels = _classify_by_change_prob(polygons, change_prob)
 
     # ── 6. GeoJSON ────────────────────────────────────────────────────────────
     # Convert pixel coords to pseudo lon/lat (identity for local CRS)
-    geojson = predictions_to_geojson(polygons=polygons, damage_labels=labels)
+    geojson = predictions_to_geojson(
+        polygons=polygons,
+        damage_labels=labels,
+        image_shape=(H, W)
+    )
     gj_path = out / "predictions.geojson"
     save_geojson(geojson, gj_path)
     log.info(f"GeoJSON saved → {gj_path}")
 
     # ── 7. Folium map ─────────────────────────────────────────────────────────
+    # Save the ORIGINAL (non-warped) post image as RGBA PNG for the map overlay.
+    # Using the original avoids the black border/tilt that warpPerspective introduces.
+    # Near-black pixels (alpha=0) are made transparent as an extra safeguard.
+    post_img_path_out = out / "post_img.png"
+    overlay_rgb = post_img_orig   # original, before homography warp
+    rgba = cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2RGBA)
+    black_mask = np.all(overlay_rgb < 10, axis=-1)
+    rgba[black_mask, 3] = 0       # make residual black pixels fully transparent
+    cv2.imwrite(str(post_img_path_out), cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+
+    H_orig, W_orig = overlay_rgb.shape[:2]
     map_path = out / "damage_map.html"
     render_damage_map(
         geojson_path=gj_path,
         output_html=map_path,
+        image_path=str(post_img_path_out),
+        image_shape=(H_orig, W_orig),
         disaster_name=disaster_name,
     )
     log.info(f"Damage map saved → {map_path}")
@@ -221,6 +240,57 @@ def run_inference(
         "map_html_path": str(map_path),
         "mask_path":     str(mask_path),
     }
+
+
+# ── Change-probability → damage label classifier ──────────────────────────────
+
+def _classify_by_change_prob(
+    polygons: List[List[Tuple[float, float]]],
+    change_prob: np.ndarray,
+    thresholds: Tuple[float, float, float] = (0.20, 0.45, 0.55),
+) -> List[int]:
+    """
+    Assign damage labels based on the mean Siamese change probability
+    inside each polygon's bounding box.
+
+    Thresholds (default):
+        mean_prob < 0.20  → 0  No Damage   (green)
+        mean_prob < 0.45  → 1  Minor       (yellow)
+        mean_prob < 0.70  → 2  Major       (orange)
+        mean_prob >= 0.70 → 3  Destroyed   (red)
+
+    This is used instead of the EfficientNet classifier because the
+    classifier checkpoint was trained only on binary change detection
+    and always predicts class 0.
+    """
+    H, W = change_prob.shape[:2] if change_prob.ndim == 2 else change_prob.shape
+    t_no, t_minor, t_major = thresholds
+    labels = []
+
+    for poly in polygons:
+        pts = np.array(poly, dtype=np.float32)
+        x_min = int(max(pts[:, 0].min(), 0))
+        y_min = int(max(pts[:, 1].min(), 0))
+        x_max = int(min(pts[:, 0].max(), W - 1))
+        y_max = int(min(pts[:, 1].max(), H - 1))
+
+        if x_max <= x_min or y_max <= y_min:
+            labels.append(0)
+            continue
+
+        region = change_prob[y_min:y_max, x_min:x_max]
+        mean_p = float(region.mean()) if region.size > 0 else 0.0
+
+        if mean_p < t_no:
+            labels.append(0)
+        elif mean_p < t_minor:
+            labels.append(1)
+        elif mean_p < t_major:
+            labels.append(2)
+        else:
+            labels.append(3)
+
+    return labels
 
 
 # ── Mask → polygon fallback ───────────────────────────────────────────────────

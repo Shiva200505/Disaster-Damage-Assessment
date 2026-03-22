@@ -81,6 +81,7 @@ def predictions_to_geojson(
     confidences: Optional[List[float]] = None,
     building_ids: Optional[List[str]] = None,
     extra_props: Optional[List[Dict[str, Any]]] = None,
+    image_shape: Optional[Tuple[int, int]] = None,
 ) -> dict:
     """
     Build a GeoJSON FeatureCollection from lists of polygons and labels.
@@ -92,6 +93,7 @@ def predictions_to_geojson(
     confidences   : optional list of float confidence scores
     building_ids  : optional list of string IDs
     extra_props   : optional list of per-building property dicts
+    image_shape   : optional (H, W) to invert Y-axis for local image plotting
 
     Returns
     -------
@@ -105,9 +107,19 @@ def predictions_to_geojson(
     confs = confidences  or [None] * n
     props = extra_props  or [None] * n
 
+    H = image_shape[0] if image_shape else 0
+    
+    transformed_polys = []
+    for poly in polygons:
+        if image_shape:
+            # Map pixel (x, y) to (x, H - y) for Folium
+            transformed_polys.append([(pt[0], H - pt[1]) for pt in poly])
+        else:
+            transformed_polys.append(poly)
+
     features = [
         _make_feature(
-            polygon_coords=polygons[i],
+            polygon_coords=transformed_polys[i],
             damage_label=damage_labels[i],
             building_id=ids[i],
             confidence=confs[i],

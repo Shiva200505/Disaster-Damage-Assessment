@@ -97,7 +97,9 @@ def render_damage_map(
     output_html: str | Path = "outputs/maps/damage_map.html",
     disaster_name: str = "Disaster Zone",
     zoom_start: int = 15,
-    tiles: str = "CartoDB positron",
+    tiles: Optional[str] = "CartoDB positron",
+    image_path: Optional[str | Path] = None,
+    image_shape: Optional[Tuple[int, int]] = None,
 ) -> str:
     """
     Render an interactive damage map from a GeoJSON predictions file.
@@ -108,7 +110,9 @@ def render_damage_map(
     output_html   : path to write the self-contained HTML file
     disaster_name : display name shown in the legend
     zoom_start    : initial map zoom level
-    tiles         : Folium tile provider name
+    tiles         : Folium tile provider name (or None for Simple CRS)
+    image_path    : optional bounding image to overlay (e.g. disaster image)
+    image_shape   : (H, W) needed if image_path is provided
 
     Returns
     -------
@@ -127,7 +131,20 @@ def render_damage_map(
     geojson = load_geojson(geojson_path)
     center  = _compute_center(geojson)
 
-    m = folium.Map(location=center, zoom_start=zoom_start, tiles=tiles)
+    # Use Simple CRS and ImageOverlay if an image is provided
+    if image_path and image_shape:
+        H, W = image_shape
+        bounds = [[0, 0], [H, W]]
+        center = [H / 2, W / 2]
+        m = folium.Map(location=center, zoom_start=1, crs="Simple", tiles=None)
+        
+        folium.raster_layers.ImageOverlay(
+            image=str(image_path),
+            bounds=bounds,
+        ).add_to(m)
+        m.fit_bounds(bounds)
+    else:
+        m = folium.Map(location=center, zoom_start=zoom_start, tiles=tiles)
 
     # Building polygons GeoJSON layer
     folium.GeoJson(
@@ -157,7 +174,8 @@ def render_damage_map(
 
     # Controls & legend
     folium.LayerControl().add_to(m)
-    MiniMap(toggle_display=True).add_to(m)
+    if not image_path:
+        MiniMap(toggle_display=True).add_to(m)
     Fullscreen().add_to(m)
     m.get_root().html.add_child(folium.Element(_legend_html(disaster_name)))
 

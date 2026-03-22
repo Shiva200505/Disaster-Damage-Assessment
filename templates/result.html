@@ -3,98 +3,308 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Assessment Output Map</title>
+    <title>Damage Assessment Results</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
             --primary: #0ea5e9;
+            --bg: #f0f4f8;
+            --card: #ffffff;
+            --text: #334155;
+            --muted: #64748b;
+            --green:  #10b981;
+            --yellow: #f59e0b;
+            --orange: #f97316;
+            --red:    #ef4444;
         }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-            font-family: 'Inter', -apple-system, sans-serif;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0;
+            font-family: 'Inter', sans-serif; color: var(--text); }
 
         body {
-            background-color: #f8fafc;
-            height: 100vh;
+            background: var(--bg);
+            min-height: 100vh;
             display: flex;
             flex-direction: column;
-            overflow: hidden;
-            color: #334155;
         }
 
-        .header {
-            background-color: #ffffff;
-            height: 64px;
+        /* ─── Top nav ─── */
+        .navbar {
+            background: white;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 1.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            position: sticky; top: 0; z-index: 100;
+        }
+        .navbar-brand { font-size: 1.1rem; font-weight: 700; color: #0f172a; }
+        .navbar-brand span { color: var(--primary); }
+        .btn-back {
+            background: #f1f5f9; color: #475569;
+            text-decoration: none; padding: 8px 16px;
+            border-radius: 8px; font-weight: 500; font-size: 0.9rem;
+            transition: all 0.2s; display: flex; align-items: center; gap: 6px;
+        }
+        .btn-back:hover { background: #e2e8f0; color: #0f172a; }
+
+        /* ─── Main layout ─── */
+        .layout {
+            display: grid;
+            grid-template-columns: 340px 1fr;
+            gap: 0;
+            flex: 1;
+            height: calc(100vh - 60px);
+            overflow: hidden;
+        }
+
+        /* ─── Left sidebar ─── */
+        .sidebar {
+            background: white;
+            border-right: 1px solid #e2e8f0;
+            overflow-y: auto;
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+
+        .section-title {
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin-bottom: 0.75rem;
+        }
+
+        /* ─── Pre/Post image comparison ─── */
+        .img-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .img-card {
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid #e2e8f0;
+            background: #f8fafc;
+        }
+        .img-card img {
+            width: 100%; height: 120px;
+            object-fit: cover; display: block;
+        }
+        .img-label {
+            font-size: 0.7rem; font-weight: 600;
+            text-align: center; padding: 5px 0;
+            color: var(--muted);
+            background: #f8fafc;
+        }
+        .img-card.before .img-label { color: #0ea5e9; }
+        .img-card.after  .img-label { color: #ef4444; }
+
+        /* ─── Damage stats ─── */
+        .stat-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 9px 12px;
+            border-radius: 10px;
+            margin-bottom: 6px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            transition: transform 0.15s;
+        }
+        .stat-row:hover { transform: translateX(3px); }
+        .stat-label {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 0.9rem; font-weight: 500;
+        }
+        .dot {
+            width: 12px; height: 12px;
+            border-radius: 50%; flex-shrink: 0;
+        }
+        .stat-count {
+            font-size: 1.1rem; font-weight: 700;
+        }
+
+        /* small bar chart per row */
+        .bar-wrap {
+            width: 100%;
+            height: 5px;
+            background: #e2e8f0;
+            border-radius: 9999px;
+            margin-top: 5px;
+            overflow: hidden;
+        }
+        .bar-fill {
+            height: 100%;
+            border-radius: 9999px;
+            transition: width 1s ease;
+        }
+
+        .total-chip {
+            background: #f1f5f9;
+            border-radius: 10px;
+            padding: 10px 14px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 0 2rem;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-            z-index: 10;
+            font-size: 0.9rem;
         }
+        .total-chip strong { font-size: 1.2rem; }
 
-        .title {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: #0f172a;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+        /* Legend colours */
+        .bg-green  { background: var(--green); }
+        .bg-yellow { background: var(--yellow); }
+        .bg-orange { background: var(--orange); }
+        .bg-red    { background: var(--red); }
+        .clr-green  { color: var(--green); }
+        .clr-yellow { color: var(--yellow); }
+        .clr-orange { color: var(--orange); }
+        .clr-red    { color: var(--red); }
 
-        .title span {
-            color: var(--primary);
-        }
-
-        .btn-back {
-            background-color: #f1f5f9;
-            color: #475569;
-            text-decoration: none;
-            padding: 8px 16px;
-            border-radius: 8px;
-            font-weight: 500;
-            font-size: 0.95rem;
-            transition: all 0.2s ease;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .btn-back:hover {
-            background-color: #e2e8f0;
-            color: #0f172a;
-        }
-
-        .map-container {
-            flex-grow: 1;
-            width: 100%;
+        /* ─── Map panel ─── */
+        .map-panel {
             position: relative;
             background: #e2e8f0;
         }
-
-        iframe {
-            width: 100%;
-            height: 100%;
-            border: none;
-            display: block;
+        .map-panel iframe {
+            width: 100%; height: 100%;
+            border: none; display: block;
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <div class="title">Damage Assessment <span>Output</span></div>
-        <a href="/" class="btn-back">
-            <span>←</span> Process New Images
-        </a>
+
+<!-- Top bar -->
+<nav class="navbar">
+    <div class="navbar-brand">Disaster Damage <span>Assessment</span></div>
+    <a href="/" class="btn-back">← New Analysis</a>
+</nav>
+
+<!-- Main grid -->
+<div class="layout">
+
+    <!-- ── Left Sidebar ── -->
+    <aside class="sidebar">
+
+        <!-- Before / After images -->
+        <div>
+            <div class="section-title">📸 Image Pair</div>
+            <div class="img-grid">
+                <div class="img-card before">
+                    {% if pre %}
+                        <img src="/uploads/{{ pre }}" alt="Before" loading="lazy">
+                    {% else %}
+                        <div style="height:120px;display:flex;align-items:center;justify-content:center;font-size:2rem;">🌍</div>
+                    {% endif %}
+                    <div class="img-label">BEFORE</div>
+                </div>
+                <div class="img-card after">
+                    {% if post %}
+                        <img src="/uploads/{{ post }}" alt="After" loading="lazy">
+                    {% else %}
+                        <div style="height:120px;display:flex;align-items:center;justify-content:center;font-size:2rem;">💥</div>
+                    {% endif %}
+                    <div class="img-label">AFTER</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Damage Statistics -->
+        <div>
+            <div class="section-title">📊 Damage Summary</div>
+
+            <div class="total-chip" style="margin-bottom:10px;">
+                <span>Total Polygons Detected</span>
+                <strong>{{ total }}</strong>
+            </div>
+
+            <!-- No Damage -->
+            <div class="stat-row">
+                <div class="stat-label">
+                    <span class="dot bg-green"></span>
+                    No Damage
+                </div>
+                <span class="stat-count clr-green">{{ no_dmg }}</span>
+            </div>
+            <div class="bar-wrap" style="margin-top:-4px; margin-bottom:8px;">
+                <div class="bar-fill bg-green"
+                     style="width: {{ ((no_dmg / total * 100) | int) if total > 0 else 0 }}%;"></div>
+            </div>
+
+            <!-- Minor -->
+            <div class="stat-row">
+                <div class="stat-label">
+                    <span class="dot bg-yellow"></span>
+                    Minor Damage
+                </div>
+                <span class="stat-count clr-yellow">{{ minor }}</span>
+            </div>
+            <div class="bar-wrap" style="margin-top:-4px; margin-bottom:8px;">
+                <div class="bar-fill bg-yellow"
+                     style="width: {{ ((minor / total * 100) | int) if total > 0 else 0 }}%;"></div>
+            </div>
+
+            <!-- Major -->
+            <div class="stat-row">
+                <div class="stat-label">
+                    <span class="dot bg-orange"></span>
+                    Major Damage
+                </div>
+                <span class="stat-count clr-orange">{{ major }}</span>
+            </div>
+            <div class="bar-wrap" style="margin-top:-4px; margin-bottom:8px;">
+                <div class="bar-fill bg-orange"
+                     style="width: {{ ((major / total * 100) | int) if total > 0 else 0 }}%;"></div>
+            </div>
+
+            <!-- Destroyed -->
+            <div class="stat-row">
+                <div class="stat-label">
+                    <span class="dot bg-red"></span>
+                    Destroyed
+                </div>
+                <span class="stat-count clr-red">{{ destroyed }}</span>
+            </div>
+            <div class="bar-wrap" style="margin-top:-4px; margin-bottom:8px;">
+                <div class="bar-fill bg-red"
+                     style="width: {{ ((destroyed / total * 100) | int) if total > 0 else 0 }}%;"></div>
+            </div>
+        </div>
+
+        <!-- Download GeoJSON -->
+        <div>
+            <div class="section-title">⬇ Export</div>
+            <a href="/map/{{ folder }}/predictions.geojson" download
+               style="display:block; text-align:center; padding:10px; border-radius:10px;
+                      background:#f1f5f9; font-weight:600; font-size:0.9rem;
+                      color:#475569; text-decoration:none; border:1px solid #e2e8f0;
+                      transition:all 0.2s;">
+                📥 Download GeoJSON
+            </a>
+        </div>
+
+        <!-- Legend -->
+        <div>
+            <div class="section-title">🗺 Map Legend</div>
+            <div style="font-size:0.8rem; line-height:2;">
+                <span style="color:var(--green);">●</span> No Damage &nbsp;
+                <span style="color:var(--yellow);">●</span> Minor &nbsp;
+                <span style="color:var(--orange);">●</span> Major &nbsp;
+                <span style="color:var(--red);">●</span> Destroyed
+            </div>
+        </div>
+    </aside>
+
+    <!-- ── Map ── -->
+    <div class="map-panel">
+        <iframe src="/map/{{ folder }}/{{ map_file }}" title="Damage Map"></iframe>
     </div>
-    
-    <div class="map-container">
-        <!-- The interactive Folium map loads directly here -->
-        <iframe src="/map/{{ folder }}/{{ map_file }}"></iframe>
-    </div>
+
+</div>
+
 </body>
 </html>

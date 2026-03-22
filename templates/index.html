@@ -180,7 +180,57 @@
             background-color: var(--text-muted);
             box-shadow: none;
             cursor: wait;
+            pointer-events: none;
         }
+
+        /* ── Loading Overlay ── */
+        .loading-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(6px);
+            z-index: 9999;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1.5rem;
+        }
+        .loading-overlay.visible { display: flex; }
+
+        .spinner {
+            width: 64px; height: 64px;
+            border: 5px solid rgba(255,255,255,0.15);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .loading-text {
+            color: #f1f5f9;
+            font-size: 1.2rem;
+            font-weight: 600;
+            text-align: center;
+        }
+        .loading-sub {
+            color: #94a3b8;
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        .loading-steps {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            margin-top: 0.5rem;
+        }
+        .step {
+            color: #64748b;
+            font-size: 0.85rem;
+            transition: color 0.4s;
+        }
+        .step.active { color: #38bdf8; font-weight: 600; }
+        .step.done   { color: #10b981; }
 
         .footer-note {
             margin-top: 2rem;
@@ -223,17 +273,29 @@
         </form>
 
         <div class="footer-note">
-            Powered by Siamese U-Net and EfficientNet-B3.
+            Powered by Siamese U-Net · Change Detection + Damage Classification
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Analyzing satellite imagery…</div>
+        <div class="loading-sub">This takes 15–40 seconds. Please wait.</div>
+        <div class="loading-steps">
+            <div class="step active" id="s1">⏳ Loading and aligning images</div>
+            <div class="step" id="s2">🔍 Running Siamese change detection</div>
+            <div class="step" id="s3">🏗️ Extracting building polygons</div>
+            <div class="step" id="s4">🎨 Classifying damage severity</div>
+            <div class="step" id="s5">🗺️ Generating interactive map</div>
         </div>
     </div>
 
     <script>
-        // Update UI when file is chosen
         function handleFile(inputId, nameId, boxId) {
             const input = document.getElementById(inputId);
             const nameDisplay = document.getElementById(nameId);
             const box = document.getElementById(boxId);
-            
             if (input.files && input.files.length > 0) {
                 nameDisplay.textContent = '✓ ' + input.files[0].name;
                 box.classList.add('active');
@@ -242,11 +304,30 @@
             }
         }
 
-        // Show loading state on submit
         document.getElementById('mainForm').addEventListener('submit', function() {
             const btn = document.getElementById('submitBtn');
-            btn.textContent = 'Analyzing Images... Please wait.';
+            btn.textContent = 'Processing…';
             btn.classList.add('loading');
+
+            // Show overlay
+            document.getElementById('loadingOverlay').classList.add('visible');
+
+            // Animate steps every ~7 seconds
+            const steps = ['s1','s2','s3','s4','s5'];
+            let current = 0;
+            const interval = setInterval(() => {
+                if (current > 0) {
+                    document.getElementById(steps[current-1]).className = 'step done';
+                    document.getElementById(steps[current-1]).textContent =
+                        '✅ ' + document.getElementById(steps[current-1]).textContent.replace('⏳','').replace('🔍','').replace('🏗️','').replace('🎨','').replace('🗺️','').trim();
+                }
+                if (current < steps.length) {
+                    document.getElementById(steps[current]).classList.add('active');
+                    current++;
+                } else {
+                    clearInterval(interval);
+                }
+            }, 7000);
         });
     </script>
 </body>
