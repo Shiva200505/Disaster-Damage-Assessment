@@ -1,23 +1,28 @@
 import os
 import json
+import time
+import torch
 from flask import Flask, request, render_template, send_from_directory, redirect, url_for
 from werkzeug.utils import secure_filename
 from member5_evaluation.inference_pipeline import run_inference
-import time
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['OUTPUT_FOLDER'] = 'outputs/inference'
-app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB max upload
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB max upload
+
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'tif', 'tiff'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
 os.makedirs('templates', exist_ok=True)
 
 # Important checkpoints path
-SIAMESE_CKPT = "checkpoints/siamese_best.pth"
+SIAMESE_CKPT = "checkpoints/siamese_stage2_best.pth"
 CLASSIFIER_CKPT = "checkpoints/classifier_best.pth"
-
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
@@ -30,6 +35,12 @@ def index():
         if pre_file.filename == '' or post_file.filename == '':
             return "No selected file", 400
 
+        if not (allowed_file(pre_file.filename) and allowed_file(post_file.filename)):
+            return "Invalid file extension. Only .png, .jpg, .jpeg, .tif, .tiff are allowed.", 400
+
+        if request.content_length is not None and request.content_length > 50 * 1024 * 1024:
+            return "File size exceeds 50MB limit.", 413
+
         pre_filename  = secure_filename(pre_file.filename)
         post_filename = secure_filename(post_file.filename)
         pre_path  = os.path.join(app.config['UPLOAD_FOLDER'], pre_filename)
@@ -38,8 +49,16 @@ def index():
         pre_file.save(pre_path)
         post_file.save(post_path)
 
-        if not os.path.exists(SIAMESE_CKPT) or not os.path.exists(CLASSIFIER_CKPT):
-            return "Error: Model checkpoints not found.", 500
+        json_path = None
+        if 'geojson' in request.files and request.files['geojson'].filename != '':
+            json_file = request.files['geojson']
+            if json_file.filename.endswith('.json'):
+                json_filename = secure_filename(json_file.filename)
+                json_path = os.path.join(app.config['UPLOAD_FOLDER'], json_filename)
+                json_file.save(json_path)
+
+        if not os.path.exists(SIAMESE_CKPT):
+            return "Error: Model checkpoint not found.", 500
 
         try:
             timestamp_dir = os.path.join(app.config['OUTPUT_FOLDER'], str(int(time.time())))
@@ -50,9 +69,11 @@ def index():
                 post_img_path=post_path,
                 siamese_ckpt=SIAMESE_CKPT,
                 classifier_ckpt=CLASSIFIER_CKPT,
+                geojson_path=json_path,
+                model_version="v2",
                 output_dir=timestamp_dir,
-                device="cuda",
-                map_threshold=0.35,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                map_threshold=0.10,
             )
 
             folder_name = os.path.basename(timestamp_dir)

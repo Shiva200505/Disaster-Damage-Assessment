@@ -30,7 +30,8 @@ class PathConfig:
 
     def __post_init__(self):
         self.train_dir = self.xbd_root / "train"
-        self.val_dir   = self.xbd_root / "test"   # use test split as val (no separate val folder)
+        val_path = self.xbd_root / "val"
+        self.val_dir   = val_path if val_path.exists() else self.xbd_root / "test"
         self.test_dir  = self.xbd_root / "test"
 
 
@@ -43,30 +44,37 @@ class PreprocessConfig:
     image_size: int   = 1024   # Original xBD tile size
     mean: tuple       = (0.485, 0.456, 0.406)   # ImageNet mean
     std:  tuple       = (0.229, 0.224, 0.225)   # ImageNet std
-    add_spectral: bool = False  # False = 3-ch RGB (faster, less memory)
+    add_spectral: bool = False  # False = 3-ch RGB (faster, less memory); keep False for Stage 1
 
 
 # ── Siamese Network Config (Member 2) ─────────────────────────────────────────
 
 @dataclass
 class SiameseConfig:
+    model_version:  str   = "v1"     # "v1" | "v2" | "v3" — use v1 for Stage 1
     encoder_name:   str   = "resnet50"
     encoder_weights: str  = "imagenet"
-    in_channels:    int   = 3      # Increase to 5 if using NDVI+NDWI channels
+    in_channels:    int   = 3      # 3 for Stage 1 (RGB only); 5 if using NDVI+NDWI
     num_classes:    int   = 1      # Binary change mask
     decoder_channels: tuple = (256, 128, 64, 32, 16)
+    map_threshold:  float = 0.35   # Prediction threshold for F1/IoU computation
 
     # Training
-    batch_size:     int   = 4    # 4 fits most 4-8 GB VRAM laptops
-    learning_rate:  float = 1e-4
-    weight_decay:   float = 1e-4
-    epochs:         int   = 100
-    patience:       int   = 10     # Early stopping patience
-    dice_weight:    float = 0.6    # Weight for Dice in combined loss
-    bce_weight:     float = 0.4
+    batch_size:     int   = 4      # Reduced from 8 for stability
+    learning_rate:  float = 8e-5   # Reduced from 1e-4 — lower LR is the most critical fix
+    weight_decay:   float = 2e-4   # Increased from 1e-4 — more regularization
+    epochs:         int   = 100    # Total epochs per stage
+    patience:       int   = 20     # Early stopping patience (increased for noisy training)
+    dice_weight:    float = 0.7    # Increased from 0.6
+    bce_weight:     float = 0.3    # Decreased from 0.4
 
     # Scheduler
     scheduler: str = "cosine"      # "cosine" | "step"
+
+    # Inference improvements
+    use_tta: bool = True
+    tta_n_augments: int = 4
+    sliding_window_stride: int = 128
 
 
 # ── Classifier Config (Member 3) ──────────────────────────────────────────────
@@ -83,7 +91,7 @@ class ClassifierConfig:
     batch_size:     int   = 32
     learning_rate:  float = 1e-4
     weight_decay:   float = 1e-4
-    epochs:         int   = 50
+    epochs:         int   = 1
     patience:       int   = 10
 
     # Focal Loss
@@ -94,6 +102,14 @@ class ClassifierConfig:
     class_names: tuple = ("no_damage", "minor_damage", "major_damage", "destroyed")
     # Color hex for visualization
     class_colors: tuple = ("#2ECC71", "#F1C40F", "#E67E22", "#E74C3C")
+
+
+# ── Data Pipeline Config ──────────────────────────────────────────────────────
+
+@dataclass
+class DataConfig:
+    crop_min_area: int = 50      # min contour area for polygon extraction
+    overlap_threshold: float = 0.3 # IoU threshold for dedup
 
 
 # ── Experiment Tracking ───────────────────────────────────────────────────────
@@ -114,11 +130,18 @@ class Config:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     siamese:    SiameseConfig   = field(default_factory=SiameseConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
+    data:       DataConfig      = field(default_factory=DataConfig)
     wandb:      WandbConfig     = field(default_factory=WandbConfig)
 
     seed: int = 42
     num_workers: int = 0   # 0 = main process only (required on Windows)
     device: str = "cuda"   # "cuda" | "cpu"
+
+    # Stage control — 1, 2, or 3 — mirrors TRAINING_STAGE in train_optimized.py
+    training_stage: int = 1
+
+    # Prediction threshold — lower than 0.5 catches predictions before the model is confident
+    prediction_threshold: float = 0.35
 
     def make_dirs(self):
         """Create all output directories if they don't exist."""

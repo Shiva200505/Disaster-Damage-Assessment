@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    image: disaster_damage_api:latest
+    container_name: dda_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - POSTGRES_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=${REDIS_URL}
+      - DEVICE=${DEVICE}
+      - SIAMESE_CKPT=${SIAMESE_CKPT}
+    env_file:
+      - .env
+    volumes:
+      - ./checkpoints:/app/checkpoints:ro
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    image: disaster_damage_api:latest
+    container_name: dda_celery_worker
+    restart: unless-stopped
+    command: ["celery", "-A", "api.tasks", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment:
+      - POSTGRES_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=${REDIS_URL}
+      - DEVICE=${DEVICE}
+      - SIAMESE_CKPT=${SIAMESE_CKPT}
+    env_file:
+      - .env
+    volumes:
+      - ./checkpoints:/app/checkpoints:ro
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  redis:
+    image: redis:7-alpine
+    container_name: dda_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: dda_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    container_name: dda_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./outputs:/app/outputs:ro
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres_data:

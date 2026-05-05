@@ -281,3 +281,43 @@ def get_dataloaders(
         shuffle=False, num_workers=num_workers, pin_memory=True,
     )
     return train_loader, val_loader
+
+def get_dataloader(
+    split: str,
+    batch_size: int = 1,
+    num_workers: int = 0,
+    patch_size: int = 256,
+    add_spectral: bool = True,
+    augment: bool = False,
+) -> torch.utils.data.DataLoader:
+    """
+    Return a single DataLoader for a specific split ('train', 'val', or 'test').
+    """
+    from torch.utils.data import DataLoader
+    
+    # Resolve the directory based on the split
+    if split == "train":
+        root_dir = cfg.paths.train_dir
+    elif split == "val":
+        root_dir = cfg.paths.val_dir
+    elif split == "test":
+        root_dir = cfg.paths.test_dir
+    else:
+        # Fallback to appending the split to the base data dir
+        root_dir = Path("data/xbd") / split
+
+    ds = XBDDataset(
+        root_dir=root_dir,
+        patch_size=patch_size,
+        split=split,
+        transform=None, # Assuming we handle augmentations inside dataset or they are None for evaluation
+        add_spectral=add_spectral,
+    )
+
+    loader = DataLoader(
+        ds, batch_size=batch_size,
+        shuffle=(split == "train"), 
+        num_workers=num_workers, 
+        pin_memory=True,
+    )
+    return loader

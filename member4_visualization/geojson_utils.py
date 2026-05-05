@@ -23,6 +23,51 @@ from typing import Any, Dict, List, Optional, Tuple
 DAMAGE_LABELS = ["no_damage", "minor_damage", "major_damage", "destroyed"]
 DAMAGE_COLORS = ["#2ECC71",   "#F1C40F",      "#E67E22",      "#E74C3C"]
 
+def parse_xbd_geojson(json_path: str | Path) -> dict:
+    """
+    Parse an xBD label JSON and return a dict with:
+      - 'pixel_polygons': list of pixel-space polygon coords (from features.xy)
+      - 'geo_polygons':   list of (lon, lat) polygon coords (from features.lng_lat)
+      - 'subtypes':       list of damage subtype strings per polygon
+    """
+    with open(json_path, encoding="utf-8") as f:
+        data = json.load(f)
+        
+    pixel_polygons = []
+    geo_polygons = []
+    subtypes = []
+    
+    for feat in data.get("features", {}).get("xy", []):
+        wkt = feat.get("wkt", "")
+        pix_coords = []
+        try:
+            coords_str = wkt.replace("POLYGON ((", "").replace("))", "").strip()
+            for pair in coords_str.split(","):
+                x, y = pair.strip().split()
+                pix_coords.append((float(x), float(y)))
+            pixel_polygons.append(pix_coords)
+            subtypes.append(feat.get("properties", {}).get("subtype", "un-classified"))
+        except Exception:
+            pass
+
+    for feat in data.get("features", {}).get("lng_lat", []):
+        wkt = feat.get("wkt", "")
+        geo_coords = []
+        try:
+            coords_str = wkt.replace("POLYGON ((", "").replace("))", "").strip()
+            for pair in coords_str.split(","):
+                x, y = pair.strip().split()
+                geo_coords.append((float(x), float(y)))
+            geo_polygons.append(geo_coords)
+        except Exception:
+            pass
+            
+    return {
+        "pixel_polygons": pixel_polygons,
+        "geo_polygons": geo_polygons,
+        "subtypes": subtypes
+    }
+
 
 def _make_feature(
     polygon_coords: List[Tuple[float, float]],
@@ -82,18 +127,20 @@ def predictions_to_geojson(
     building_ids: Optional[List[str]] = None,
     extra_props: Optional[List[Dict[str, Any]]] = None,
     image_shape: Optional[Tuple[int, int]] = None,
+    geo_polygons: Optional[List[List[Tuple[float, float]]]] = None,
 ) -> dict:
     """
     Build a GeoJSON FeatureCollection from lists of polygons and labels.
 
     Parameters
     ----------
-    polygons      : list of polygon coordinate lists, each [[lon, lat], ...]
+    polygons      : list of pixel polygon coordinate lists, each [[x, y], ...]
     damage_labels : list of integer class predictions (0–3) per polygon
     confidences   : optional list of float confidence scores
     building_ids  : optional list of string IDs
     extra_props   : optional list of per-building property dicts
     image_shape   : optional (H, W) to invert Y-axis for local image plotting
+    geo_polygons  : optional list of real WGS84 (lon, lat) polygons
 
     Returns
     -------
@@ -107,15 +154,21 @@ def predictions_to_geojson(
     confs = confidences  or [None] * n
     props = extra_props  or [None] * n
 
-    H = image_shape[0] if image_shape else 0
-    
     transformed_polys = []
-    for poly in polygons:
-        if image_shape:
-            # Map pixel (x, y) to (x, H - y) for Folium
-            transformed_polys.append([(pt[0], H - pt[1]) for pt in poly])
-        else:
-            transformed_polys.append(poly)
+    is_pixel = False
+
+    # If true geo polygons are passed, bypass pixel Y-flip logic
+    if geo_polygons and len(geo_polygons) == n:
+        transformed_polys = geo_polygons
+    else:
+        is_pixel = True
+        H = image_shape[0] if image_shape else 0
+        for poly in polygons:
+            if image_shape:
+                # Map pixel (x, y) to (x, H - y) for Folium CRS Simple
+                transformed_polys.append([(pt[0], H - pt[1]) for pt in poly])
+            else:
+                transformed_polys.append(poly)
 
     features = [
         _make_feature(
@@ -128,17 +181,21 @@ def predictions_to_geojson(
         for i in range(n)
     ]
 
-    # Summary statistics in the collection-level properties
     from collections import Counter
     label_counts = Counter(damage_labels)
     summary = {label: label_counts.get(i, 0) for i, label in enumerate(DAMAGE_LABELS)}
 
+    collection_props = {
+        "total_buildings": n,
+        **summary,
+    }
+    
+    if is_pixel:
+        collection_props["crs"] = "pixel"
+
     return {
         "type": "FeatureCollection",
-        "properties": {
-            "total_buildings": n,
-            **summary,
-        },
+        "properties": collection_props,
         "features": features,
     }
 

@@ -13,16 +13,62 @@ Usage
 """
 
 import logging
+import logging.handlers
 import sys
+import json
+import os
 from typing import Any, Dict, Optional
 
 _wandb_run = None   # module-level W&B run handle
 
 
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "module": record.name,
+            "message": record.getMessage()
+        }
+        
+        # Attach any structured data
+        if hasattr(record, 'extra_data'):
+            log_record.update(record.extra_data)
+        elif isinstance(record.msg, dict):
+            # If msg is a dict, flatten it into root
+            log_record.update(record.msg)
+            log_record["message"] = "" # or json.dumps(record.msg)
+            
+        return json.dumps(log_record)
+
+
+def get_file_logger(log_dir="outputs/logs") -> logging.Logger:
+    """Rotates daily, keeps 7 days of logs in JSON format."""
+    os.makedirs(log_dir, exist_ok=True)
+    
+    logger = logging.getLogger("disaster_da_file")
+    if logger.handlers:
+        return logger
+        
+    logger.setLevel(logging.INFO)
+    
+    log_path = os.path.join(log_dir, "training.log.jsonl")
+    handler = logging.handlers.TimedRotatingFileHandler(
+        log_path, when="midnight", interval=1, backupCount=7
+    )
+    handler.setLevel(logging.INFO)
+    
+    formatter = JSONFormatter(datefmt="%Y-%m-%d %H:%M:%S")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    
+    return logger
+
+
 # ── Standard Logger ───────────────────────────────────────────────────────────
 
 def get_logger(name: str = "disaster_da", level: int = logging.INFO) -> logging.Logger:
-    """Return a configured logger that writes to stdout."""
+    """Return a configured logger that writes to stdout and logs dictionary to file."""
     logger = logging.getLogger(name)
     if logger.handlers:          # avoid duplicate handlers on re-import
         return logger
@@ -80,12 +126,20 @@ def log_metrics(metrics: Dict[str, float], step: Optional[int] = None) -> None:
         try:
             import wandb  # type: ignore
             wandb.log(metrics, step=step)
-            return
         except Exception:
             pass
-    # Fallback: print to logger
+            
+    # Fallback and structured logging
     msg = "  ".join(f"{k}={v:.4f}" for k, v in metrics.items())
     get_logger().info(f"[step={step}] {msg}")
+    
+    try:
+        f_logger = get_file_logger()
+        # Embed step inside metrics explicitly for the json line
+        json_metrics = {"step": step, **metrics}
+        f_logger.info(json_metrics, extra={"extra_data": json_metrics})
+    except Exception:
+        pass
 
 
 def finish_wandb() -> None:

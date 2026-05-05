@@ -27,7 +27,6 @@ from member4_visualization.geojson_utils import (
     load_geojson, DAMAGE_LABELS, DAMAGE_COLORS,
 )
 
-
 # ── Pure-Python helpers (no folium dependency) ────────────────────────────────
 
 def _style_fn(feature: dict) -> dict:
@@ -72,13 +71,25 @@ def _compute_center(geojson: dict) -> Tuple[float, float]:
     return (sum(lats) / len(lats), sum(lons) / len(lons))
 
 
-def _legend_html(disaster_name: str) -> str:
+def _legend_html(disaster_name: str, is_pixel: bool, geojson_name: str) -> str:
     items = "".join(
         f'<div><span style="background:{c};width:14px;height:14px;'
         f'display:inline-block;border-radius:3px;margin-right:6px;">'
         f'</span>{lbl.replace("_", " ").title()}</div>'
         for lbl, c in zip(DAMAGE_LABELS, DAMAGE_COLORS)
     )
+    
+    pixel_warn = ''
+    if is_pixel:
+        pixel_warn = '<div style="color:red;font-size:11px;margin-top:5px;line-height:1.2;">&#9888; Coordinates are approximate pixel space</div>'
+
+    download_btn = (
+        f'<div style="margin-top:10px;text-align:center;">'
+        f'<a href="{geojson_name}" download '
+        f'style="background:#007bff;color:white;padding:5px 10px;text-decoration:none;border-radius:4px;font-size:12px;display:block;">'
+        f'&#11015; Download GeoJSON</a></div>'
+    )
+
     return (
         '<div style="position:fixed;bottom:30px;left:30px;z-index:1000;'
         'background:rgba(255,255,255,0.92);border:1px solid #ccc;'
@@ -86,7 +97,10 @@ def _legend_html(disaster_name: str) -> str:
         'font-size:13px;line-height:1.8;'
         'box-shadow:2px 2px 8px rgba(0,0,0,0.15);">'
         f'<b>&#128752; {disaster_name}</b><br/>Damage Severity'
-        f'<hr style="margin:4px 0"/>{items}</div>'
+        f'<hr style="margin:4px 0"/>{items}'
+        f'{pixel_warn}'
+        f'{download_btn}'
+        '</div>'
     )
 
 
@@ -118,7 +132,6 @@ def render_damage_map(
     -------
     Absolute path of the written HTML file as a string.
     """
-    # Lazy folium import — only required when actually rendering
     try:
         import folium
         from folium.plugins import MiniMap, Fullscreen
@@ -131,8 +144,10 @@ def render_damage_map(
     geojson = load_geojson(geojson_path)
     center  = _compute_center(geojson)
 
-    # Use Simple CRS and ImageOverlay if an image is provided
-    if image_path and image_shape:
+    is_pixel = geojson.get("properties", {}).get("crs") == "pixel"
+
+    # Use Simple CRS and ImageOverlay if using pixel coordinates and an image is provided
+    if is_pixel and image_path and image_shape:
         H, W = image_shape
         bounds = [[0, 0], [H, W]]
         center = [H / 2, W / 2]
@@ -144,40 +159,55 @@ def render_damage_map(
         ).add_to(m)
         m.fit_bounds(bounds)
     else:
+        # Use Standard CRS with WGS84 Coords
         m = folium.Map(location=center, zoom_start=zoom_start, tiles=tiles)
 
     # Building polygons GeoJSON layer
+    tooltip = None
+    if len(geojson.get("features", [])) > 0:
+        tooltip = folium.GeoJsonTooltip(
+            fields=["damage_class", "building_id"],
+            aliases=["Damage:", "ID:"],
+            sticky=False,
+        )
+
     folium.GeoJson(
         geojson,
         name="Building Damage",
         style_function=_style_fn,
         highlight_function=_highlight_fn,
-        tooltip=folium.GeoJsonTooltip(
-            fields=["damage_class", "building_id"],
-            aliases=["Damage:", "ID:"],
-            sticky=False,
-        ),
+        tooltip=tooltip,
     ).add_to(m)
 
-    # Per-feature popups with rich HTML
+    # Per-feature popups with correct CircleMarker mapping (avoids leafet warnings from empty DivIcons)
     for feature in geojson.get("features", []):
         props = feature["properties"]
-        ring  = feature["geometry"]["coordinates"][0]
-        lat_c = sum(pt[1] for pt in ring) / len(ring)
-        lon_c = sum(pt[0] for pt in ring) / len(ring)
-        folium.Popup(_popup_html(props), max_width=220).add_to(
-            folium.Marker(
-                location=[lat_c, lon_c],
-                icon=folium.DivIcon(html="", icon_size=(1, 1)),
-            ).add_to(m)
-        )
+        coords = feature["geometry"]["coordinates"][0]
+        if len(coords) == 0:
+            continue
+            
+        lat_c = sum(pt[1] for pt in coords) / len(coords)
+        lon_c = sum(pt[0] for pt in coords) / len(coords)
+        
+        folium.CircleMarker(
+            location=[lat_c, lon_c],
+            radius=0,
+            color='transparent',
+            fill=False,
+            popup=folium.Popup(_popup_html(props), max_width=220)
+        ).add_to(m)
 
     # Controls & legend
     folium.LayerControl().add_to(m)
-    if not image_path:
+    
+    # Add MiniMap ONLY for real coordinates
+    if not is_pixel:
         MiniMap(toggle_display=True).add_to(m)
+        
     Fullscreen().add_to(m)
-    m.get_root().html.add_child(folium.Element(_legend_html(disaster_name)))
+    
+    geojson_filename = Path(geojson_path).name
+    m.get_root().html.add_child(folium.Element(_legend_html(disaster_name, is_pixel, geojson_filename)))
 
     output_html = Path(output_html)
     output_html.parent.mkdir(parents=True, exist_ok=True)

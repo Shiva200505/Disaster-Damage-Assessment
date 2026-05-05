@@ -1,217 +1,275 @@
 """
-member3_classifier/train_classifier.py
-────────────────────────────────────────────────────────────────────────────
-Member 3 – Damage Classifier Training Loop
-
-Trains the EfficientNet-B3 model to classify individual building crops
-into 4 damage severity levels using Focal Loss.
-
-Training data: building crops extracted from xBD images using GeoJSON
-polygon coordinates. Each crop is labelled with the polygon's "subtype"
-damage category (no-damage, minor-damage, major-damage, destroyed).
+train_classifier.py — Train EfficientNet-B3 on per-building crops.
+Run: python train_classifier.py --data-dir data/building_crops --epochs 30
 """
 
 import argparse
-import random
+import os
+import time
 from pathlib import Path
 
+import cv2
 import numpy as np
+import pandas as pd
 import torch
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, Dataset
-from sklearn.metrics import f1_score, confusion_matrix
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from sklearn.metrics import classification_report
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+import timm
+from tqdm import tqdm
 
-from member3_classifier.efficientnet_classifier import DamageClassifier
-from member3_classifier.focal_loss import FocalLoss
-from utils.checkpoint import save_checkpoint
-from utils.config import cfg
-from utils.logger import get_logger, init_wandb, log_metrics, finish_wandb
+import torchvision.transforms as T
+from member3_classifier.augmentation import get_crop_train_transforms, get_crop_val_transforms
+from utils.logger import get_logger
 
 log = get_logger(__name__)
 
-CLASS_NAMES = list(cfg.classifier.class_names)
+# --- Optional Custom Focal Loss ---
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, label_smoothing=0.1):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.label_smoothing = label_smoothing
 
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, label_smoothing=self.label_smoothing, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        return focal_loss.mean()
 
-# ── Building Crop Dataset ─────────────────────────────────────────────────────
-
-class BuildingCropDataset(Dataset):
-    """
-    Loads pre-extracted building crop images and their damage labels.
-
-    Expects a directory structure built by the preprocessing pipeline:
-        data/building_crops/
-            ├── 0_no_damage/    *.png  ...
-            ├── 1_minor/        *.png  ...
-            ├── 2_major/        *.png  ...
-            └── 3_destroyed/    *.png  ...
-
-    Parameters
-    ----------
-    root_dir  : path to the building_crops/ directory
-    transform : optional Albumentations transform
-    crop_size : resize target (default 64)
-    """
-
-    import json
-
-    def __init__(self, root_dir: str | Path, transform=None, crop_size: int = 64):
-        import cv2
-        self.root_dir  = Path(root_dir)
+# --- Dataset ---
+class CropDataset(Dataset):
+    def __init__(self, csv_path, img_dir, transform=None):
+        self.df = pd.read_csv(csv_path)
+        self.img_dir = Path(img_dir)
         self.transform = transform
-        self.crop_size = crop_size
-        self.samples: list = []   # (image_path, label)
-        self._scan()
-
-    def _scan(self):
-        label_dirs = {
-            "0_no_damage":  0,
-            "1_minor":      1,
-            "2_major":      2,
-            "3_destroyed":  3,
-        }
-        for dir_name, label in label_dirs.items():
-            d = self.root_dir / dir_name
-            if not d.exists():
-                continue
-            for img_path in d.glob("*.png"):
-                self.samples.append((img_path, label))
-
+        
+        # Fast existence check: build a set of files in the directory once
+        existing_files = set(os.listdir(str(self.img_dir)))
+        self.df["exists"] = self.df["filename"].isin(existing_files)
+        if not self.df["exists"].all():
+            missing = (~self.df["exists"]).sum()
+            log.warning(f"Found {missing} missing images in {img_dir}. Filtering them out.")
+            self.df = self.df[self.df["exists"]]
+            
     def __len__(self):
-        return len(self.samples)
-
+        return len(self.df)
+        
     def __getitem__(self, idx):
-        import cv2
-        path, label = self.samples[idx]
-        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if img is None:
-            img = np.zeros((self.crop_size, self.crop_size, 3), dtype=np.uint8)
-        else:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img, (self.crop_size, self.crop_size))
-
+        row = self.df.iloc[idx]
+        img_path = str(self.img_dir / row["filename"])
+        label = int(row["label"])
+        
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
         if self.transform:
-            img = self.transform(image=img)["image"]
+            if hasattr(self.transform, "transforms"): # Check if torchvision vs albumentation
+                try: # Albumentations
+                    res = self.transform(image=img)
+                    img = res["image"]
+                except TypeError: # Torchvision
+                    from PIL import Image
+                    img = Image.fromarray(img)
+                    img = self.transform(img)
+            else:
+                 res = self.transform(image=img)
+                 img = res["image"]
+            
+        return img, label
+        
+    def get_labels(self):
+        return self.df["label"].values
 
-        img = torch.from_numpy(img.astype(np.float32) / 255.0).permute(2, 0, 1)
-        return img, torch.tensor(label, dtype=torch.long)
-
-
-# ── Training / Validation ─────────────────────────────────────────────────────
-
-def train_one_epoch(model, loader, criterion, optimizer, device):
+# --- Training loop ---
+def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
-    total_loss, all_preds, all_labels = 0.0, [], []
-
-    for imgs, labels in loader:
-        imgs, labels = imgs.to(device), labels.to(device)
+    running_loss = 0.0
+    for imgs, targets in tqdm(loader, desc="Training", leave=False):
+        imgs, targets = imgs.to(device), targets.to(device)
+        
         optimizer.zero_grad()
-        logits = model(imgs)
-        loss   = criterion(logits, labels)
+        with torch.amp.autocast(device.type):
+            outputs = model(imgs)
+            loss = criterion(outputs, targets)
+            
         loss.backward()
         optimizer.step()
-
-        total_loss += loss.item()
-        all_preds.extend(logits.argmax(1).cpu().tolist())
-        all_labels.extend(labels.cpu().tolist())
-
-    macro_f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-    return {"loss": total_loss / len(loader), "macro_f1": macro_f1}
-
+        
+        running_loss += loss.item() * imgs.size(0)
+        
+    return running_loss / len(loader.dataset)
 
 @torch.no_grad()
-def validate(model, loader, criterion, device):
+def evaluate(model, loader, criterion, device):
     model.eval()
-    total_loss, all_preds, all_labels = 0.0, [], []
+    running_loss = 0.0
+    all_preds, all_targets = [], []
+    
+    for imgs, targets in tqdm(loader, desc="Validating", leave=False):
+        imgs, targets = imgs.to(device), targets.to(device)
+        
+        with torch.amp.autocast(device.type):
+            outputs = model(imgs)
+            loss = criterion(outputs, targets)
+            
+        running_loss += loss.item() * imgs.size(0)
+        preds = outputs.argmax(dim=1)
+        
+        all_preds.extend(preds.cpu().numpy())
+        all_targets.extend(targets.cpu().numpy())
+        
+    avg_loss = running_loss / len(loader.dataset)
+    return avg_loss, np.array(all_preds), np.array(all_targets)
 
-    for imgs, labels in loader:
-        imgs, labels = imgs.to(device), labels.to(device)
-        logits = model(imgs)
-        total_loss += criterion(logits, labels).item()
-        all_preds.extend(logits.argmax(1).cpu().tolist())
-        all_labels.extend(labels.cpu().tolist())
+# --- Main ---
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-dir", type=str, default="data/building_crops", help="Base dir with train/val subfolders")
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from", default=None)
+    parser.add_argument("--freeze-backbone", action="store_true", help="Freeze backbone for first N epochs")
+    parser.add_argument("--freeze-epochs", type=int, default=5, help="Number of epochs to freeze backbone")
+    parser.add_argument("--use-torchvision", action="store_true", help="Use standard torchvision transforms instead of Albumentations")
+    args = parser.parse_args()
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log.info(f"Using device: {device}")
+    
+    # Transforms (ImageNet normalization via Albumentations or torchvision)
+    if args.use_torchvision:
+        # Proper ImageNet normalization via torchvision.transforms
+        log.info("Using torchvision.transforms with proper ImageNet normalization.")
+        train_tfms = T.Compose([
+            T.RandomHorizontalFlip(p=0.5),
+            T.RandomVerticalFlip(p=0.5),
+            T.ColorJitter(brightness=0.3, contrast=0.3),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        val_tfms = T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+    else:
+        log.info("Using Albumentations pipelines with proper ImageNet normalization.")
+        train_tfms = get_crop_train_transforms(crop_size=64)
+        val_tfms = get_crop_val_transforms(crop_size=64)
+    
+    # Datasets
+    train_dir = Path(args.data_dir) / "train"
+    val_dir = Path(args.data_dir) / "val"
+    
+    train_csv = train_dir / "metadata.csv"
+    val_csv = val_dir / "metadata.csv"
+    
+    if not train_csv.exists() or not val_csv.exists():
+        log.error("Missing metadata.csv! Ensure extract_crops.py has been run for --split train and --out-split val")
+        return
+        
+    train_ds = CropDataset(train_csv, train_dir, transform=train_tfms)
+    val_ds = CropDataset(val_csv, val_dir, transform=val_tfms)
+    log.info(f"Train size: {len(train_ds)}, Val size: {len(val_ds)}")
+    
+    # Weighted Random Sampler for Class Imbalance
+    class_counts = np.bincount(train_ds.get_labels())
+    class_weights = np.where(class_counts > 0, 1.0 / np.maximum(class_counts, 1), 0)
+    sample_weights = [class_weights[lbl] for lbl in train_ds.get_labels()]
+    sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+    
+    num_workers = min(4, os.cpu_count() or 1)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    
+    # Model
+    model = timm.create_model("efficientnet_b3", pretrained=True, num_classes=4)
+    model.to(device)
+    
+    # Disabled torch.compile due to Triton dependency on Windows
+    pass
 
-    macro_f1  = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-    per_class = f1_score(all_labels, all_preds, average=None, zero_division=0)
-    cm        = confusion_matrix(all_labels, all_preds, labels=[0,1,2,3])
-    return {
-        "loss":       total_loss / len(loader),
-        "macro_f1":   macro_f1,
-        "per_class_f1": per_class.tolist(),
-        "confusion_matrix": cm,
-    }
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-def train(args):
-    random.seed(cfg.seed); np.random.seed(cfg.seed); torch.manual_seed(cfg.seed)
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    log.info(f"Training classifier on: {device}")
-    cfg.make_dirs()
-
-    if cfg.wandb.enabled:
-        init_wandb(cfg.wandb.project, cfg.wandb.entity,
-                   config={"model": "EfficientNetB3", **vars(args)},
-                   run_name="classifier_run")
-
-    crop_root = Path("data/building_crops")
-    train_ds  = BuildingCropDataset(crop_root / "train", crop_size=cfg.classifier.crop_size)
-    val_ds    = BuildingCropDataset(crop_root / "val",   crop_size=cfg.classifier.crop_size)
-
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.num_workers, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False,
-                              num_workers=args.num_workers, pin_memory=True)
-
-    model     = DamageClassifier(num_classes=4, pretrained=True).to(device)
-    criterion = FocalLoss(alpha=cfg.classifier.focal_alpha, gamma=cfg.classifier.focal_gamma)
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=cfg.classifier.weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
-
-    best_f1, patience_counter = 0.0, 0
-    ckpt_path = cfg.paths.checkpoint_dir / "classifier_best.pth"
-
-    for epoch in range(1, args.epochs + 1):
-        tr = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        va = validate(model, val_loader, criterion, device)
-        scheduler.step()
-
-        log.info(
-            f"[{epoch:03d}/{args.epochs}] "
-            f"train_loss={tr['loss']:.4f}  "
-            f"val_loss={va['loss']:.4f}  "
-            f"val_macro_f1={va['macro_f1']:.4f}"
-        )
-        for i, name in enumerate(CLASS_NAMES):
-            log.info(f"  {name}: F1={va['per_class_f1'][i]:.4f}")
-
-        log_metrics({
-            "train/loss": tr["loss"], "train/macro_f1": tr["macro_f1"],
-            "val/loss": va["loss"],   "val/macro_f1": va["macro_f1"],
-        }, step=epoch)
-
-        if va["macro_f1"] > best_f1:
-            best_f1 = va["macro_f1"]
-            patience_counter = 0
-            save_checkpoint(model, optimizer, epoch, val_f1=best_f1, path=ckpt_path)
+    # Freeze Backbone mechanism
+    if args.freeze_backbone and args.freeze_epochs > 0:
+        log.info(f"Freezing backbone for the first {args.freeze_epochs} epochs")
+        for param in model.parameters():
+            param.requires_grad = False
+        if hasattr(model._orig_mod if hasattr(model, "_orig_mod") else model, "get_classifier"):
+            classifier = (model._orig_mod if hasattr(model, "_orig_mod") else model).get_classifier()
+            for param in classifier.parameters():
+                param.requires_grad = True
+    
+    criterion = FocalLoss(label_smoothing=0.1)
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
+    
+    # CosineAnnealingWarmRestarts
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+    
+    start_epoch = 0
+    best_f1 = 0.0
+    
+    if args.resume:
+        if Path(args.resume).exists():
+            log.info(f"Resuming from {args.resume}")
+            ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt["model_state"])
+            if "optimizer_state" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state"])
+            if "scheduler_state" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler_state"])
+            start_epoch = ckpt.get("epoch", 0) + 1
+            best_f1 = ckpt.get("best_f1", 0.0)
         else:
-            patience_counter += 1
-            if patience_counter >= args.patience:
-                log.info(f"Early stopping at epoch {epoch}")
-                break
-
-    log.info(f"Training complete. Best macro F1 = {best_f1:.4f}")
-    finish_wandb()
-
+            log.warning(f"Resume checkpoint {args.resume} not found. Starting fresh.")
+    
+    Path("outputs").mkdir(exist_ok=True)
+    Path("checkpoints").mkdir(exist_ok=True)
+    
+    # Training Loop
+    for epoch in range(start_epoch, args.epochs):
+        
+        # Unfreeze backbone check
+        if args.freeze_backbone and epoch == args.freeze_epochs:
+            log.info("Unfreezing backbone for fine-tuning")
+            for param in model.parameters():
+                param.requires_grad = True
+            
+            optimizer = optim.AdamW(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
+            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+        
+        t0 = time.time()
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss, preds, targets = evaluate(model, val_loader, criterion, device)
+        scheduler.step()
+        t1 = time.time()
+        
+        # Sklearn classification report
+        target_names = ["no_damage", "minor_damage", "major_damage", "destroyed"]
+        report = classification_report(targets, preds, target_names=target_names, output_dict=True, zero_division=0)
+        report_str = classification_report(targets, preds, target_names=target_names, zero_division=0)
+        
+        macro_f1 = report["macro avg"]["f1-score"]
+        log.info(f"Epoch {epoch}/{args.epochs-1} [{t1-t0:.1f}s] - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Val Macro F1: {macro_f1:.4f}")
+        
+        with open("outputs/classifier_eval.txt", "a") as f:
+            f.write(f"\n--- Epoch {epoch} ---\n")
+            f.write(report_str)
+            
+        if macro_f1 > best_f1:
+            best_f1 = macro_f1
+            state_dict = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") else model.state_dict()
+            torch.save({
+                "epoch": epoch,
+                "model_state": state_dict,
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+                "best_f1": best_f1
+            }, "checkpoints/classifier_best.pth")
+            log.info("Saved new best checkpoint.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train EfficientNet-B3 Damage Classifier")
-    parser.add_argument("--epochs",      type=int,   default=cfg.classifier.epochs)
-    parser.add_argument("--batch-size",  type=int,   default=cfg.classifier.batch_size)
-    parser.add_argument("--lr",          type=float, default=cfg.classifier.learning_rate)
-    parser.add_argument("--patience",    type=int,   default=cfg.classifier.patience)
-    parser.add_argument("--device",      type=str,   default=cfg.device)
-    parser.add_argument("--num-workers", type=int,   default=cfg.num_workers)
-    args = parser.parse_args()
-    train(args)
+    main()

@@ -267,6 +267,15 @@
                     <div class="file-name" id="namePost"></div>
                     <input type="file" name="post_img" id="post_img" accept=".png,.jpg,.jpeg,.tif,.tiff" required onchange="handleFile('post_img', 'namePost', 'boxPost')">
                 </div>
+
+                <!-- Ground Truth Labels (Optional) -->
+                <div class="upload-box" id="boxJson">
+                    <span class="icon">🏷️</span>
+                    <div class="box-title">Labels (Optional)</div>
+                    <div class="box-subtitle">Building footprints (.json)</div>
+                    <div class="file-name" id="nameJson"></div>
+                    <input type="file" name="geojson" id="geojson" accept=".json" onchange="handleFile('geojson', 'nameJson', 'boxJson')">
+                </div>
             </div>
 
             <button type="submit" class="btn-submit" id="submitBtn">Generate Intelligence Map</button>

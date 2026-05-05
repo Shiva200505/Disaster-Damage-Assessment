@@ -110,8 +110,10 @@ def align_images(
     kp1, des1 = orb.detectAndCompute(ref_gray, None)
     kp2, des2 = orb.detectAndCompute(mov_gray, None)
 
+    h, w = reference.shape[:2]
+
     if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
-        return moving  # insufficient keypoints — return unaligned
+        return cv2.resize(moving, (w, h))  # insufficient keypoints — fallback to resize
 
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
     raw_matches = matcher.knnMatch(des1, des2, k=2)
@@ -120,16 +122,25 @@ def align_images(
     good = [m for m, n in raw_matches if m.distance < good_match_ratio * n.distance]
 
     if len(good) < 4:
-        return moving  # not enough inliers
+        return cv2.resize(moving, (w, h))  # not enough inliers
 
     src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
 
     H_mat, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+    
+    fallback = False
     if H_mat is None:
-        return moving
+        fallback = True
+    else:
+        # Prevent extreme distortions (determinant check)
+        det = H_mat[0,0] * H_mat[1,1] - H_mat[0,1] * H_mat[1,0]
+        if det < 0.2 or det > 5.0:
+            fallback = True
 
-    h, w = reference.shape[:2]
+    if fallback:
+        return cv2.resize(moving, (w, h))
+
     aligned = cv2.warpPerspective(moving, H_mat, (w, h))
     return aligned
 
